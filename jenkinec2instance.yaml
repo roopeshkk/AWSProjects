@@ -14,7 +14,6 @@ Parameters:
     AllowedPattern: '^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$'
 
 Resources:
-  # Security Group for Jenkins Server
   JenkinsSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
@@ -44,11 +43,10 @@ Resources:
         - Key: Name
           Value: Jenkins-SecurityGroup
 
-  # IAM Role for Jenkins EC2 Instance
   JenkinsRole:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: JenkinsEC2Role
+      RoleName: JenkinsRole
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -58,6 +56,7 @@ Resources:
             Action: sts:AssumeRole
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore  # For Session Manager
       Policies:
         - PolicyName: JenkinsCloudFormationPolicy
           PolicyDocument:
@@ -68,4 +67,108 @@ Resources:
                   - cloudformation:*
                   - iam:PassRole
                   - iam:CreateRole
-                Resource: "*"
+                  - iam:DeleteRole
+                  - iam:GetRole
+                  - iam:ListRoles
+                  - iam:AttachRolePolicy
+                  - iam:DetachRolePolicy
+                  - iam:PutRolePolicy
+                  - iam:DeleteRolePolicy
+                  - ec2:*
+                  - s3:*
+                  - logs:*
+                Resource: '*'
+      Tags:
+        - Key: Name
+          Value: Jenkins-Role
+
+
+  JenkinsInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: JenkinsInstanceProfile
+      Roles:
+        - !Ref JenkinsRole
+
+  # EC2 Instance for Jenkins
+  JenkinsInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: ami-0c02fb55956c7d316  # Amazon Linux 2 AMI
+      InstanceType: t2.micro
+      KeyName: !Ref KeyPairName
+      SubnetId: subnet-02385d842a0318434
+      SecurityGroupIds:
+        - !Ref JenkinsSecurityGroup
+      IamInstanceProfile: !Ref JenkinsInstanceProfile
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          yum update -y
+          
+          # Install Java 11 (required for Jenkins)
+          yum install -y java-11-amazon-corretto-headless
+          
+          # Install Git
+          yum install -y git
+          
+          # Install AWS CLI v2
+          curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+          unzip awscliv2.zip
+          ./aws/install
+          
+          # Install Jenkins
+          wget -O /etc/yum.repos.d/jenkins.repo https://pkg.jenkins.io/redhat-stable/jenkins.repo
+          rpm --import https://pkg.jenkins.io/redhat-stable/jenkins.io-2023.key
+          yum install -y jenkins
+          
+          # Start and enable Jenkins
+          systemctl start jenkins
+          systemctl enable jenkins
+          
+          # Install Docker (useful for Jenkins pipelines)
+          yum install -y docker
+          systemctl start docker
+          systemctl enable docker
+          usermod -a -G docker jenkins
+          usermod -a -G docker ec2-user
+          
+          # Install CloudFormation helper scripts
+          yum install -y aws-cfn-bootstrap
+          
+          # Signal that the instance is ready
+          /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource JenkinsInstance --region ${AWS::Region}
+      Tags:
+        - Key: Name
+          Value: Jenkins-Server
+        - Key: Purpose
+          Value: CI-CD-Pipeline
+    CreationPolicy:
+      ResourceSignal:
+        Count: 1
+        Timeout: PT15M
+
+Outputs:
+  InstanceId:
+    Description: Instance ID of the Jenkins server
+    Value: !Ref JenkinsInstance
+    Export:
+      Name: !Sub '${AWS::StackName}-InstanceId'
+  
+  PublicIP:
+    Description: Public IP address of the Jenkins server
+    Value: !GetAtt JenkinsInstance.PublicIp
+    Export:
+      Name: !Sub '${AWS::StackName}-PublicIP'
+  
+  JenkinsURL:
+    Description: URL to access Jenkins web interface
+    Value: !Sub 'http://${JenkinsInstance.PublicIp}:8080'
+    Export:
+      Name: !Sub '${AWS::StackName}-JenkinsURL'
+  
+  SSHCommand:
+    Description: SSH command to connect to the instance
+    Value: !Sub 'ssh -i your-key.pem ec2-user@${JenkinsInstance.PublicIp}'
+    Export:
+      Name: !Sub '${AWS::StackName}-SSHCommand'
