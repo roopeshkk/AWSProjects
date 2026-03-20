@@ -68,3 +68,4 @@ Resources:
                   - cloudformation:*
                   - iam:PassRole
                   - iam:CreateRole
+                
